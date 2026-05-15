@@ -71,22 +71,26 @@ main/
 ├── include/
 │   ├── espnow_rx.h          # ESP-NOW 接收层
 │   ├── crsf_parser.h        # CRSF 遥测帧解析
-│   ├── gps_tracker.h        # 飞机 GPS 状态维护 + 本机坐标
-│   ├── pointing_calc.h      # 方位角 / 仰角计算
-│   ├── servo_driver.h       # PWM 舵机驱动
-│   ├── antenna_control.h    # 舵机联动 / 跟踪逻辑
-│   ├── config_store.h       # NVS 配置持久化（已有）
-│   ├── wifi_config.h        # WiFi AP（已有）
-│   ├── nvs_store.h          # NVS 初始化（已有）
-│   └── log_service.h        # 日志（已有）
+│   ├── gps_tracker.h        # 飞机 GPS 状态维护 + 本机坐标标定
+│   ├── pointing_calc.h      # 方位角 / 仰角计算 + 双解选优
+│   ├── servo_driver.h       # PWM 舵机驱动 + 标定补偿
+│   ├── antenna_control.h    # 跟踪主循环 + 过渡时间管理
+│   ├── buzzer.h             # 蜂鸣器驱动（GPIO + 软件定时器）
+│   ├── web_calib.h          # HTTP 标定页面服务
+│   ├── config_store.h       # NVS 配置持久化
+│   ├── wifi_config.h        # WiFi AP
+│   ├── nvs_store.h          # NVS 初始化
+│   └── log_service.h        # 日志
 └── src/
-    ├── app_main.c           # 入口
+    ├── app_main.c
     ├── espnow_rx.c
     ├── crsf_parser.c
     ├── gps_tracker.c
     ├── pointing_calc.c
     ├── servo_driver.c
     ├── antenna_control.c
+    ├── buzzer.c
+    ├── web_calib.c
     └── ...（已有模块）
 ```
 
@@ -97,12 +101,14 @@ main/
 | 模块 | 职责 | 关键接口 |
 |------|------|---------|
 | `espnow_rx` | 初始化 ESP-NOW，注册接收回调，将原始包推入 FreeRTOS 队列 | `espnow_rx_init()` |
-| `crsf_parser` | 从 ESP-NOW payload 中识别并解析 CRSF 帧，提取 GPS 帧字段 | `crsf_parse(buf, len, &frame)` |
-| `gps_tracker` | 维护飞机实时坐标、本机（地面站）坐标、最后更新时间戳、信号丢失检测 | `gps_tracker_update()` / `gps_tracker_get_target()` |
-| `pointing_calc` | Haversine 公式计算方位角，反正切计算仰角 | `calc_pointing(home, target, &az, &el)` |
-| `servo_driver` | LEDC PWM 输出，角度→脉宽映射，行程软件限位 | `servo_set_angle(id, deg)` |
-| `antenna_control` | 跟踪主循环，坐标系转换，死区/平滑处理，盲区决策 | `antenna_control_task()` |
-| `config_store` | NVS 读写：本机坐标、舵机校准值、零点偏移、盲区方向 | `config_load()` / `config_save()` |
+| `crsf_parser` | 从 ESP-NOW payload 中识别并解析裸 CRSF 帧，提取 GPS 帧字段 | `crsf_parse(buf, len, &frame)` |
+| `gps_tracker` | 维护飞机实时坐标；本机坐标标定（前 10 次有效帧均值）；丢失检测 | `gps_tracker_update()` / `gps_tracker_get_target()` / `gps_tracker_home_ready()` |
+| `pointing_calc` | Haversine 方位角 + 仰角；双解计算；选最优解；卡尔曼滤波 | `calc_pointing(home, target, cur, &sol)` |
+| `servo_driver` | LEDC PWM 输出（333 Hz），角度→脉宽映射，行程限位，施加标定补偿 | `servo_set_angle(id, deg)` / `servo_set_raw(id, deg)` |
+| `antenna_control` | 跟踪主循环；过渡时间管理；信号丢失保持；标定模式暂停 | `antenna_control_task()` / `antenna_control_pause()` |
+| `buzzer` | GPIO 驱动蜂鸣器，软件定时器实现节拍模式 | `buzzer_init()` / `buzzer_play(pattern)` |
+| `web_calib` | HTTP 服务；提供标定页面；接收手动控制和标定保存指令 | `web_calib_init()` |
+| `config_store` | NVS 读写：本机坐标、舵机标定偏移、方向反转标志 | `config_load()` / `config_save()` |
 
 ---
 
@@ -129,19 +135,78 @@ if (azimuth < 0) azimuth += 360.0;       // 转换为 [0, 360]
 double elevation = atan2(alt_diff, horiz_dist) * RAD2DEG;  // [-90, 90]
 ```
 
-### 6.3 舵机角度映射
+### 6.3 双解模型与最优解选取
+
+任意目标方向存在两组舵机解，几何上等价：
 
 ```
-方位舵机（300°）：
-  有效范围   [0°, 300°]
-  盲区方向   [300°, 360°]（安装时盲区背向常用飞行方向）
-  映射公式   servo_az = azimuth * (300.0 / 360.0)
-  盲区处理   目标进入盲区时，取最近边界快速穿越（待定方案）
+解 A（正向）：  az_servo = Az × (300/360)
+               el_servo = El              （0° = 水平朝前，90° = 垂直朝上）
 
-仰角舵机（180°）：
-  有效范围   [-10°, 90°] → 映射到 [0°, 180°] 舵机行程
-  映射公式   servo_el = (elevation + 10.0) / 100.0 * 180.0
+解 B（翻转）：  az_servo = (Az ± 180°) × (300/360)   ← 方位转到对侧
+               el_servo = 180° - El                  ← 俯仰越过顶部翻转
 ```
+
+**几何解释：**
+- 天线正向朝前（El = 0°→90°），俯仰舵机从水平转到垂直
+- 翻转后（El = 90°→180°），方位指向对侧，俯仰继续越过顶部，天线等效指向同一目标
+
+**最优解判据（最小总转动量）：**
+```c
+float cost_A = fabsf(cur_az_servo - target_az_A) + fabsf(cur_el_servo - target_el_A);
+float cost_B = fabsf(cur_az_servo - target_az_B) + fabsf(cur_el_servo - target_el_B);
+use_flip = (cost_B < cost_A);
+```
+
+**盲区处理（Az ∈ [300°, 360°]）：**
+- 解 A 的 az_servo 超出 [0°, 300°]，无效
+- 强制使用解 B：az_servo = (Az - 180°) × (300/360)，el_servo = 180° - El
+- 此时盲区跳变为"翻转过顶"，跳变过程时间可计算（见 §6.4）
+
+### 6.4 舵机角度映射
+
+```c
+// 方位舵机（300°）
+// az ∈ [0°, 360°)，解 A：az_A ∈ [0°, 300°] 有效，解 B：az_B = az ± 180°
+float servo_az_from_geo(float az_deg) {
+    return az_deg * (300.0f / 360.0f);  // [0°, 300°]
+}
+
+// 仰角舵机（180°）
+// 解 A：el ∈ [0°, 90°]  → servo ∈ [0°, 180°]（水平到垂直）
+// 解 B：el ∈ [0°, 90°]  → servo = 180° - el ∈ [180°, 90°]（越顶翻转）
+// 低仰角 el < 0°（俯角）最大支持到 -10°，解 A 仅向下延伸
+float servo_el_from_real(float el_deg, bool flip) {
+    if (!flip) return el_deg + 10.0f;          // [-10°, 90°] → [0°, 100°]... 
+    else       return (180.0f - el_deg);        // 翻转解
+}
+// 脉宽统一由 angle_to_pulse_us(servo_deg, 180.0f) 映射
+```
+
+**电气零点定义：**
+- 仰角舵机 servo=0° → 脉宽 500 µs → 天线水平朝前
+- 仰角舵机 servo=90° → 脉宽 1500 µs → 天线垂直朝上
+- 仰角舵机 servo=180° → 脉宽 2500 µs → 天线水平朝后（翻转解最大位置）
+
+### 6.5 跳变过渡时间计算
+
+```c
+// 舵机速度：0.16 s / 60° = 2.667 °/ms
+#define SERVO_DEG_PER_MS  (60.0f / 160.0f)   // ≈ 0.375 °/ms
+
+// 从当前位置到目标位置的过渡时间（取两轴最大值）
+float transition_ms(float cur_az, float cur_el, float tgt_az, float tgt_el) {
+    float t_az = fabsf(tgt_az - cur_az) / SERVO_DEG_PER_MS;
+    float t_el = fabsf(tgt_el - cur_el) / SERVO_DEG_PER_MS;
+    return fmaxf(t_az, t_el);
+}
+```
+
+**过渡期行为：**
+1. 计算当前解与目标解（含翻转）的 cost，选最优解
+2. 发送目标位置到舵机（一次性写入，舵机自行运动）
+3. `vTaskDelay(pdMS_TO_TICKS((uint32_t)transition_ms + 20))`  ← 多留 20 ms 余量
+4. 延迟结束后恢复正常 1 Hz 卡尔曼更新跟踪循环
 
 ---
 
@@ -183,25 +248,305 @@ ELRS 遥测使用 CRSF 协议，GPS 帧 `CRSF_FRAMETYPE_GPS = 0x02`：
 
 ---
 
-## 9. 待确认事项
+## 9. 硬件与行为参数（已确认）
 
-| # | 问题 | 影响模块 |
-|---|------|---------|
-| 1 | 高频头 ESP-NOW payload 格式：裸 CRSF 帧 还是有额外封装？ | `espnow_rx` / `crsf_parser` |
-| 2 | 本机坐标来源：NVS 预存 / 板载 GPS 模块 / WiFi 页面配置？ | `gps_tracker` / `config_store` |
-| 3 | 300° 舵机盲区方向：安装时朝哪个方位？盲区穿越策略？ | `antenna_control` |
-| 4 | 舵机型号与信号：标准 50 Hz PWM (1000~2000 µs)？GPIO 引脚分配？ | `servo_driver` |
-| 5 | 信号丢失行为：超时后原地保持 / 缓慢归中 / 扫描模式？ | `antenna_control` |
-| 6 | 平滑滤波方案：低通滤波 / 卡尔曼？更新频率目标值？ | `pointing_calc` / `antenna_control` |
+| # | 参数 | 确认值 | 影响模块 |
+|---|------|--------|---------|
+| 1 | ESP-NOW payload 格式 | 裸 CRSF 帧，无额外封装 | `espnow_rx` / `crsf_parser` |
+| 2 | 本机坐标来源 | 从 CRSF GPS 帧提取，前 10 次有效坐标平均值；确定后蜂鸣器发出滴滴声 | `gps_tracker` / `buzzer` |
+| 3 | 方位舵机安装与盲区 | 中位朝正南（生产）/ 朝机头（测试）；60° 盲区朝正北；见 §10 标定流程 | `antenna_control` |
+| 4 | 舵机规格 | 333 Hz 数字舵机，脉宽 500~2500 µs；GPIO 用宏 `SERVO_AZ_GPIO` / `SERVO_EL_GPIO` 占位 | `servo_driver` |
+| 5 | 信号丢失行为 | 保持当前位置，等待下次 GPS 更新；禁止归中和扫描 | `antenna_control` |
+| 6 | 平滑滤波方案 | 卡尔曼滤波；ELRS 上行速率约 1 Hz，以此为更新节拍 | `pointing_calc` / `antenna_control` |
 
 ---
 
-## 10. 开发优先级建议
+## 10. 现场标定流程
+
+> 每次出飞前执行一次，约 2~3 分钟。
 
 ```
-Phase 1  ESP-NOW 接收 + CRSF 解析        ← 先拿到飞机坐标，数据源最关键
-Phase 2  pointing_calc 指向角计算        ← 纯数学，可在 PC 上先验证
-Phase 3  servo_driver PWM 驱动           ← 验证舵机响应和行程
-Phase 4  antenna_control 跟踪闭环        ← 联调
-Phase 5  config_store + WiFi 配置页面    ← 工程化，方便现场调参
+步骤 1 — 穿越机 GPS 预热
+  ├── 穿越机放在地面，等待 ELRS 高频头开始转发遥测
+  ├── AatGo 接收 CRSF GPS 帧，累计有效坐标
+  └── 当连续 10 次有效坐标采集完成：
+        → 计算平均值 → 存入 home_lat / home_lon / home_alt（NVS）
+        → 蜂鸣器发出 "滴滴" 声（标定完成提示）
+
+步骤 2 — 地面站就位
+  ├── 听到滴滴声后，穿越机可以移开
+  ├── 将 AatGo 放到穿越机原来的位置
+  │     ← 此时 home 坐标即为天线架设坐标，误差 < 穿越机尺寸
+  └── 用指南针将方位舵机中位对准正南方向
+
+步骤 3 — 跟踪就绪
+  └── 移动穿越机即可触发实时跟踪
+```
+
+**关键约束：**
+- 方位舵机中位 = 正南，60° 盲区朝正北（后方），正常飞行方向 ≠ 正北即可
+- 仰角舵机中位朝上，垂直地面；天线随仰角舵机俯仰
+- 测试时"中位朝机头"替代"正南"，逻辑相同，方向参考改变
+
+---
+
+## 11. 舵机驱动参数
+
+```c
+// servo_driver.h 中定义，GPIO 待硬件确认后替换宏值
+#define SERVO_AZ_GPIO       18          // 方位舵机 GPIO（占位）
+#define SERVO_EL_GPIO       19          // 仰角舵机 GPIO（占位）
+
+#define SERVO_FREQ_HZ       333         // 数字舵机 333 Hz
+#define SERVO_PERIOD_US     (1000000 / SERVO_FREQ_HZ)   // ≈ 3003 µs
+
+#define SERVO_PULSE_MIN_US  500         // 最小脉宽
+#define SERVO_PULSE_MAX_US  2500        // 最大脉宽
+
+// 方位舵机（300°）
+#define SERVO_AZ_RANGE_DEG  300
+#define SERVO_AZ_BLIND_DEG  60          // 盲区，朝正北
+
+// 仰角舵机（180°）
+#define SERVO_EL_RANGE_DEG  180
+#define SERVO_EL_MIN_DEG    (-10)       // 对应 500 µs
+#define SERVO_EL_MAX_DEG    90          // 对应 2500 µs
+```
+
+**脉宽映射公式：**
+```c
+// angle_deg: 舵机物理角度 [0, range]
+uint32_t angle_to_pulse_us(float angle_deg, float range_deg) {
+    return (uint32_t)(SERVO_PULSE_MIN_US
+        + (angle_deg / range_deg) * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US));
+}
+```
+
+---
+
+## 12. 舵机安装标定系统
+
+### 12.1 标定参数模型
+
+舵机安装时无法做到机械精确对中，需要软件补偿。每个舵机有三个标定参数：
+
+```c
+// config_store.h 中的标定结构体
+typedef struct {
+    float az_offset_deg;    // 方位舵机零点偏移（正值=顺时针偏移）
+    float el_offset_deg;    // 仰角舵机零点偏移（正值=偏高）
+    bool  az_reversed;      // 方位舵机方向是否反装
+    bool  el_reversed;      // 仰角舵机方向是否反装
+} servo_calib_t;
+```
+
+**补偿应用位置：** 在 `servo_driver` 内部，`servo_set_angle()` 调用时施加，上层模块传入的永远是"理想角度"：
+
+```c
+// servo_driver.c
+static float apply_calib_az(float ideal_deg) {
+    float out = calib.az_reversed
+                ? (SERVO_AZ_RANGE_DEG - ideal_deg)   // 方向翻转
+                : ideal_deg;
+    out += calib.az_offset_deg;                       // 零点偏移
+    return clamp(out, 0.0f, SERVO_AZ_RANGE_DEG);
+}
+
+static float apply_calib_el(float ideal_deg) {
+    float out = calib.el_reversed
+                ? (SERVO_EL_RANGE_DEG - ideal_deg)
+                : ideal_deg;
+    out += calib.el_offset_deg;
+    return clamp(out, 0.0f, SERVO_EL_RANGE_DEG);
+}
+```
+
+新增 `servo_set_raw(id, deg)` 接口供标定页面直接驱动原始角度，绕过标定补偿：
+
+```c
+void servo_set_angle(servo_id_t id, float ideal_deg);  // 施加标定，正常跟踪用
+void servo_set_raw(servo_id_t id, float raw_deg);       // 绕过标定，标定页面专用
+```
+
+---
+
+### 12.2 Web 标定页面（`web_calib`）
+
+#### HTTP 接口
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/` | 返回标定页面 HTML |
+| GET | `/api/status` | JSON：当前舵机原始角度、标定参数、跟踪状态 |
+| POST | `/api/servo` | 手动驱动舵机到指定原始角度 |
+| POST | `/api/calib/save` | 保存标定参数到 NVS |
+| POST | `/api/calib/reset` | 清零所有标定参数 |
+| POST | `/api/track/pause` | 暂停/恢复跟踪任务 |
+
+**`POST /api/servo` body（JSON）：**
+```json
+{ "az": 150.0, "el": 90.0 }
+```
+
+**`POST /api/calib/save` body（JSON）：**
+```json
+{
+  "az_offset": -3.5,
+  "el_offset":  2.0,
+  "az_reversed": false,
+  "el_reversed": false
+}
+```
+
+#### 标定页面 UI 布局
+
+```
+┌─────────────────────────────────────────────────┐
+│  AatGo 舵机标定                    [暂停跟踪 ●]  │
+├─────────────────────────────────────────────────┤
+│  方位舵机（AZ）                                  │
+│  当前原始角度：[ 148.5 °]                         │
+│                                                  │
+│  手动控制：  [◀◀ -10°] [◀ -1°] [▶ +1°] [▶▶ +10°] │
+│  快速定位：  [归中 150°]  [最小 0°]  [最大 300°]  │
+│                                                  │
+│  偏移校正：  offset [ -1.5 ] °   [方向反转 □]    │
+├─────────────────────────────────────────────────┤
+│  仰角舵机（EL）                                  │
+│  当前原始角度：[  91.0 °]                         │
+│                                                  │
+│  手动控制：  [◀◀ -10°] [◀ -1°] [▶ +1°] [▶▶ +10°] │
+│  快速定位：  [水平 0°]  [垂直 90°]  [最大 180°]   │
+│                                                  │
+│  偏移校正：  offset [  1.0 ] °   [方向反转 □]    │
+├─────────────────────────────────────────────────┤
+│              [保存标定]      [重置标定]            │
+└─────────────────────────────────────────────────┘
+```
+
+#### 标定操作步骤（页面内说明文字）
+
+```
+方位舵机标定：
+  1. 点击"暂停跟踪"，进入手动模式
+  2. 点击"归中 150°"让舵机到机械中位
+  3. 用指南针/参照物确认天线实际朝向
+  4. 用 ±1° / ±10° 按钮微调，直到天线正对参考方向（正南或机头）
+  5. 记录此时原始角度，计算 offset = 150° - 当前角度，填入偏移框
+     （或直接点击按钮自动计算：当前位置设为中位）
+
+仰角舵机标定：
+  1. 点击"水平 0°"让舵机到水平位置
+  2. 用水平尺确认天线是否真正水平
+  3. 微调直到真正水平，同法计算 offset
+  4. 点击"垂直 90°"验证垂直时是否准确
+
+完成后点击"保存标定"写入 NVS，重启后自动加载。
+```
+
+---
+
+### 12.3 标定模式与跟踪模式切换
+
+标定期间必须暂停跟踪任务，防止跟踪覆盖手动控制：
+
+```c
+// antenna_control.h
+void antenna_control_pause(bool pause);   // true=暂停，false=恢复
+bool antenna_control_is_paused(void);
+```
+
+状态机：
+```
+TRACKING ──[/api/track/pause]──▶ CALIBRATING
+              (暂停 FreeRTOS 任务通知)
+CALIBRATING ──[/api/track/pause]──▶ TRACKING
+              (发送恢复通知，重新从当前位置开始卡尔曼)
+```
+
+恢复跟踪时重置卡尔曼滤波器初始状态，避免从标定位置产生大幅跳转。
+
+---
+
+## 13. 蜂鸣器驱动设计
+
+### 12.1 硬件接口
+
+```c
+// buzzer.h
+#define BUZZER_GPIO   XX   // 待定，占位宏
+
+// 蜂鸣器类型：有源蜂鸣器（GPIO 高电平响）
+// 若使用无源蜂鸣器，需改为 LEDC 输出固定频率方波（推荐 2700 Hz）
+```
+
+### 12.2 节拍模式定义
+
+```c
+typedef enum {
+    BUZZER_PATTERN_CALIBRATED,   // 标定完成：滴滴（两短声）
+    BUZZER_PATTERN_WARN,         // 预留：单长声（信号丢失警告）
+} buzzer_pattern_t;
+
+// 节拍表（ON ms, OFF ms, 重复次数）
+static const buzzer_beat_t PATTERNS[] = {
+    [BUZZER_PATTERN_CALIBRATED] = {.on_ms = 100, .off_ms = 100, .repeat = 2},
+    [BUZZER_PATTERN_WARN]       = {.on_ms = 500, .off_ms = 0,   .repeat = 1},
+};
+```
+
+### 12.3 实现方式
+
+使用 ESP-IDF `esp_timer`（软件定时器）驱动，不占用 RTOS 任务：
+
+```c
+// buzzer.c 核心逻辑
+void buzzer_play(buzzer_pattern_t pattern) {
+    // 将 pattern 参数存入静态状态机
+    // 启动一次性 esp_timer，回调中切换 GPIO 并计数 repeat
+    // 全部 beat 完成后停止定时器，GPIO 拉低
+}
+```
+
+**调用时机：**
+- `gps_tracker.c`：第 10 次有效坐标采集后 → `buzzer_play(BUZZER_PATTERN_CALIBRATED)`
+
+## 13. 卡尔曼滤波说明
+
+针对方位角和仰角各维护一个独立的 1-D 卡尔曼滤波器：
+
+```
+状态变量 x  ：当前角度估计值
+过程噪声 Q  ：角速度方差（穿越机机动性），初始值 0.1°²
+观测噪声 R  ：GPS 定位误差引起的角度方差，初始值 1.0°²
+更新周期    ：1 Hz（与 ELRS 遥测速率一致）
+```
+
+当 GPS 超时（> 3 s 无新帧）时停止更新，滤波器输出保持最后估计值，舵机位置不变。
+
+---
+
+## 16. 开发优先级
+
+```
+Phase 1  espnow_rx + crsf_parser
+         ← 接收裸 CRSF 帧，验证 GPS 数据字段解析正确
+
+Phase 2  buzzer + gps_tracker（本机坐标标定）
+         ← 10 次均值累积；标定完成触发滴滴声
+
+Phase 3  pointing_calc（Haversine + 双解 + 卡尔曼）
+         ← 纯数学，可在 PC 上先写单元测试验证
+
+Phase 4  servo_driver（333 Hz LEDC PWM + 标定补偿层）
+         ← 验证舵机响应；servo_set_angle / servo_set_raw 双接口
+
+Phase 5  web_calib（标定页面 + HTTP API）
+         ← 此时可以在无 GPS 信号的桌面环境完整标定舵机
+
+Phase 6  antenna_control（跟踪闭环）
+         ← 联调双解选优、过渡时间、信号丢失保持、标定模式切换
+
+Phase 7  config_store 整合 + 全参数持久化
+         ← 坐标、标定偏移、方向反转均落 NVS，重启免重标定
 ```
