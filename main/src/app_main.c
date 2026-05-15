@@ -8,6 +8,12 @@
 #include "log_service.h"
 #include "nvs_store.h"
 #include "wifi_config.h"
+#include "buzzer.h"
+#include "gps_tracker.h"
+#include "espnow_rx.h"
+#include "servo_driver.h"
+#include "antenna_control.h"
+#include "web_calib.h"
 
 static const char *TAG = "aatgo";
 
@@ -20,9 +26,18 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(wifi_config_init());
+    buzzer_init();
+    gps_tracker_init();
 
-    ESP_LOGI(TAG, "System ready");
+    /* WiFi SoftAP must start before ESP-NOW */
+    ESP_ERROR_CHECK(wifi_config_init());
+    ESP_ERROR_CHECK(espnow_rx_init());
+
+    ESP_ERROR_CHECK(servo_driver_init());
+    ESP_ERROR_CHECK(web_calib_init());
+    ESP_ERROR_CHECK(antenna_control_start());
+
+    ESP_LOGI(TAG, "System ready — connect to '%s' for calibration", AATGO_WIFI_SSID);
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(10000));

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AatGo 标定</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px}
+h1{text-align:center;font-size:1.2em;color:#4fc3f7;padding:10px 0}
+.status{text-align:center;font-size:.85em;color:#90caf9;margin-bottom:8px}
+.paused{color:#ffb74d}
+.card{background:#16213e;border-radius:8px;padding:12px;margin-bottom:12px}
+.card h2{font-size:1em;color:#4fc3f7;margin-bottom:10px}
+.angle-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.angle{font-size:1.4em;font-weight:bold;min-width:70px}
+.unit{font-size:.9em;color:#90caf9}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+button{padding:9px 12px;border:none;border-radius:5px;cursor:pointer;font-size:.85em;font-weight:bold}
+.jog{background:#0f3460;color:#e0e0e0}
+.jog:active{background:#4fc3f7;color:#1a1a2e}
+.preset{background:#1a3a5c;color:#90caf9}
+.preset:active{background:#4fc3f7;color:#1a1a2e}
+.opt-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px}
+.opt-row label{font-size:.85em;color:#aaa}
+input[type=number]{width:72px;padding:6px;background:#0a1628;border:1px solid #4fc3f7;
+  color:#e0e0e0;border-radius:4px;font-size:.9em}
+.chk-label{display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer}
+input[type=checkbox]{width:16px;height:16px;cursor:pointer}
+.btn-pause{width:100%;padding:13px;font-size:1em;background:#e65100;color:white;
+  border-radius:6px;margin-bottom:12px}
+.btn-save{width:100%;padding:13px;font-size:1em;background:#2e7d32;color:white;
+  border-radius:6px;margin-bottom:8px}
+.btn-reset{width:100%;padding:13px;font-size:1em;background:#b71c1c;color:white;
+  border-radius:6px}
+.home-badge{display:inline-block;padding:3px 8px;border-radius:10px;font-size:.8em;margin-left:8px}
+.home-ok{background:#1b5e20;color:#a5d6a7}
+.home-wait{background:#4a2700;color:#ffcc80}
+</style>
+</head>
+<body>
+<h1>AatGo 舵机标定</h1>
+
+<div class="status" id="statusLine">连接中...</div>
+
+<button class="btn-pause" id="btnPause" onclick="togglePause()">⏸ 暂停跟踪</button>
+
+<div class="card">
+  <h2>方位舵机 (AZ)</h2>
+  <div class="angle-row">
+    <span class="unit">当前</span>
+    <span class="angle" id="azAngle">---</span>
+    <span class="unit">°</span>
+  </div>
+  <div class="btn-row">
+    <button class="jog" onclick="jogServo('az',-10)">◀◀ -10°</button>
+    <button class="jog" onclick="jogServo('az',-1)">◀ -1°</button>
+    <button class="jog" onclick="jogServo('az',1)">+1° ▶</button>
+    <button class="jog" onclick="jogServo('az',10)">+10° ▶▶</button>
+  </div>
+  <div class="btn-row">
+    <button class="preset" onclick="setServo('az',0)">最小 0°</button>
+    <button class="preset" onclick="setServo('az',150)">归中 150°</button>
+    <button class="preset" onclick="setServo('az',300)">最大 300°</button>
+  </div>
+  <div class="opt-row">
+    <label>偏移 offset：</label>
+    <input type="number" id="azOffset" step="0.5" value="0"> °
+    <label class="chk-label">
+      <input type="checkbox" id="azReversed"> 方向反转
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <h2>仰角舵机 (EL)</h2>
+  <div class="angle-row">
+    <span class="unit">当前</span>
+    <span class="angle" id="elAngle">---</span>
+    <span class="unit">°</span>
+  </div>
+  <div class="btn-row">
+    <button class="jog" onclick="jogServo('el',-10)">◀◀ -10°</button>
+    <button class="jog" onclick="jogServo('el',-1)">◀ -1°</button>
+    <button class="jog" onclick="jogServo('el',1)">+1° ▶</button>
+    <button class="jog" onclick="jogServo('el',10)">+10° ▶▶</button>
+  </div>
+  <div class="btn-row">
+    <button class="preset" onclick="setServo('el',0)">水平 0°</button>
+    <button class="preset" onclick="setServo('el',90)">垂直 90°</button>
+    <button class="preset" onclick="setServo('el',180)">最大 180°</button>
+  </div>
+  <div class="opt-row">
+    <label>偏移 offset：</label>
+    <input type="number" id="elOffset" step="0.5" value="0"> °
+    <label class="chk-label">
+      <input type="checkbox" id="elReversed"> 方向反转
+    </label>
+  </div>
+</div>
+
+<button class="btn-save" onclick="saveCalib()">💾 保存标定到 NVS</button>
+<button class="btn-reset" onclick="resetCalib()">↺ 重置标定参数</button>
+
+<script>
+var curAz=150,curEl=90,paused=false;
+
+function applyStatus(d){
+  curAz=d.az_raw; curEl=d.el_raw; paused=d.paused;
+  document.getElementById('azAngle').textContent=d.az_raw.toFixed(1);
+  document.getElementById('elAngle').textContent=d.el_raw.toFixed(1);
+  document.getElementById('azOffset').value=d.az_offset.toFixed(1);
+  document.getElementById('elOffset').value=d.el_offset.toFixed(1);
+  document.getElementById('azReversed').checked=d.az_reversed;
+  document.getElementById('elReversed').checked=d.el_reversed;
+  var btn=document.getElementById('btnPause');
+  var sl=document.getElementById('statusLine');
+  var homeTag=d.home_ready
+    ?'<span class="home-badge home-ok">GPS ✓</span>'
+    :'<span class="home-badge home-wait">GPS 标定中</span>';
+  if(paused){
+    btn.textContent='▶ 恢复跟踪';
+    btn.style.background='#2e7d32';
+    sl.innerHTML='⏸ 标定模式'+homeTag;
+    sl.className='status paused';
+  } else {
+    btn.textContent='⏸ 暂停跟踪';
+    btn.style.background='#e65100';
+    sl.innerHTML='● 跟踪中'+homeTag;
+    sl.className='status';
+  }
+}
+
+function poll(){
+  fetch('/api/status').then(function(r){return r.json();}).then(applyStatus)
+    .catch(function(){document.getElementById('statusLine').textContent='⚠ 连接失败';});
+}
+
+function jogServo(axis,delta){
+  setServo(axis,(axis==='az'?curAz:curEl)+delta);
+}
+
+function setServo(axis,angle){
+  var body=axis==='az'?{az:angle,el:curEl}:{az:curAz,el:angle};
+  fetch('/api/servo',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)}).then(function(r){return r.json();}).then(applyStatus);
+}
+
+function togglePause(){
+  fetch('/api/track/pause',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pause:!paused})}).then(function(r){return r.json();}).then(applyStatus);
+}
+
+function saveCalib(){
+  var body={
+    az_offset:parseFloat(document.getElementById('azOffset').value),
+    el_offset:parseFloat(document.getElementById('elOffset').value),
+    az_reversed:document.getElementById('azReversed').checked,
+    el_reversed:document.getElementById('elReversed').checked
+  };
+  fetch('/api/calib/save',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){
+      applyStatus(d); alert('标定已保存');});
+}
+
+function resetCalib(){
+  if(!confirm('确认重置所有标定参数？')) return;
+  fetch('/api/calib/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    applyStatus(d); alert('标定已重置');});
+}
+
+setInterval(poll,1000);
+poll();
+</script>
+</body>
+</html>
