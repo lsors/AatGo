@@ -8,6 +8,14 @@ static const char *TAG       = "config_store";
 static const char *NVS_NS    = "aatgo";
 static const char *KEY_CALIB = "servo_calib";
 
+/* NVS 数据持久性说明：
+ *   - NVS 分区（partitions.csv 中的 "nvs"）与 app 分区完全独立。
+ *   - idf.py flash / OTA 升级只覆盖 ota_0/ota_1，不触碰 NVS。
+ *   - 只有 idf.py erase-flash 或手动 nvs_flash_erase() 才会清除数据。
+ *   - 结构体大小变化时（固件迭代新增字段），下面的 sz != sizeof(*calib)
+ *     校验会安全地将数据重置为默认值，避免读到脏数据。
+ */
+
 void config_reset(servo_calib_t *calib)
 {
     memset(calib, 0, sizeof(*calib));

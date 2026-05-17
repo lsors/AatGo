@@ -142,6 +142,53 @@ static esp_err_t handler_track_pause(httpd_req_t *req)
     return send_json(req, make_status_json());
 }
 
+/* POST /api/calib/offset  {"axis":"az","delta":1}
+ * 在内存中更新偏移量，立即驱动对应舵机到参考归中位置供观察，不写 NVS。
+ * AZ 参考位置：150°（300° 量程正中心）
+ * EL 参考位置：  0°（天线水平朝前）
+ */
+static esp_err_t handler_calib_offset(httpd_req_t *req)
+{
+    char buf[128];
+    if (read_body(req, buf, sizeof(buf)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *axis_j  = cJSON_GetObjectItem(root, "axis");
+    cJSON *delta_j = cJSON_GetObjectItem(root, "delta");
+    if (!cJSON_IsString(axis_j) || !cJSON_IsNumber(delta_j)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need axis+delta");
+        return ESP_FAIL;
+    }
+
+    float delta  = (float)delta_j->valuedouble;
+    bool  is_az  = (strcmp(axis_j->valuestring, "az") == 0);
+    cJSON_Delete(root);
+
+    if (is_az) {
+        s_calib.az_offset_deg += delta;
+        servo_calib_update(&s_calib);
+        /* 驱动到 AZ 量程中心，叠加新偏移，方便观察安装对中是否准确 */
+        servo_set_angle(SERVO_AZ, 150.0f);
+    } else {
+        s_calib.el_offset_deg += delta;
+        servo_calib_update(&s_calib);
+        /* 驱动到 90°（垂直朝上），叠加新偏移，方便观察安装是否对中 */
+        servo_set_angle(SERVO_EL, 90.0f);
+    }
+
+    ESP_LOGI(TAG, "Offset preview: az_off=%.1f el_off=%.1f",
+             s_calib.az_offset_deg, s_calib.el_offset_deg);
+    return send_json(req, make_status_json());
+}
+
 /* ---- Init ---- */
 
 esp_err_t web_calib_init(void)
@@ -151,7 +198,7 @@ esp_err_t web_calib_init(void)
     servo_calib_update(&s_calib);
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 8;
+    cfg.max_uri_handlers = 9;
 
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
@@ -165,7 +212,8 @@ esp_err_t web_calib_init(void)
         {.uri = "/api/servo",       .method = HTTP_POST, .handler = handler_servo},
         {.uri = "/api/calib/save",  .method = HTTP_POST, .handler = handler_calib_save},
         {.uri = "/api/calib/reset", .method = HTTP_POST, .handler = handler_calib_reset},
-        {.uri = "/api/track/pause", .method = HTTP_POST, .handler = handler_track_pause},
+        {.uri = "/api/track/pause",   .method = HTTP_POST, .handler = handler_track_pause},
+        {.uri = "/api/calib/offset",  .method = HTTP_POST, .handler = handler_calib_offset},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         httpd_register_uri_handler(s_server, &uris[i]);

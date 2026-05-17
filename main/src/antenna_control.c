@@ -19,8 +19,8 @@ static volatile bool s_paused = false;
 static void tracking_task(void *arg)
 {
     QueueHandle_t q    = espnow_rx_get_queue();
-    float         cur_az = 150.0f;   /* start at mechanical centre */
-    float         cur_el =   0.0f;
+    float         cur_az = 160.0f;   /* matches servo startup neutral */
+    float         cur_el =  90.0f;  /* matches servo startup neutral */
 
     ESP_LOGI(TAG, "Tracking task started, waiting for home calibration...");
 

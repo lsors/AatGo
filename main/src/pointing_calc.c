@@ -100,13 +100,14 @@ void calc_pointing(const gps_coord_t *home,
     float az_filt = kalman_update_az(&s_kf_az, (float)az_geo);
     float el_filt = kalman_update_el(&s_kf_el, (float)el_deg);
 
-    /* ---- Solution A: direct ---- */
-    float az_A = az_filt * (SERVO_AZ_RANGE_DEG / 360.0f);
+    /* ---- Solution A: direct (1:1 — servo angle equals geographic azimuth) ----
+     * The 320° servo covers geo 0°..320° directly; the remaining 40° is the blind zone. */
+    float az_A = az_filt;
     float el_A = el_filt;                          /* [0, 90] */
 
     /* ---- Solution B: flip (az ±180°, el = 180-el) ---- */
     float az_geo_B = (az_filt >= 180.0f) ? (az_filt - 180.0f) : (az_filt + 180.0f);
-    float az_B     = az_geo_B * (SERVO_AZ_RANGE_DEG / 360.0f);
+    float az_B     = az_geo_B;
     float el_B     = 180.0f - el_filt;             /* [90, 180] */
 
     /* Clamp both solutions to servo ranges */

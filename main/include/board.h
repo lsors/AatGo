@@ -7,8 +7,8 @@
  */
 
 /* ---- 蜂鸣器 ---- */
-#define BUZZER_GPIO         2
+#define BUZZER_GPIO         4
 
 /* ---- 舵机 PWM ---- */
-#define SERVO_AZ_GPIO       18      /* 方位舵机（底部，300°） */
-#define SERVO_EL_GPIO       19      /* 仰角舵机（顶部，180°） */
+#define SERVO_AZ_GPIO       5      /* 方位舵机（底部，数字舵机，320°全量程使用，中位 160°） */
+#define SERVO_EL_GPIO       6      /* 仰角舵机（顶部，180°） */

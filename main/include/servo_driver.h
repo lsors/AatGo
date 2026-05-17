@@ -4,7 +4,7 @@
 #include "config_store.h"
 #include "board.h"
 
-#define SERVO_AZ_RANGE_DEG  300.0f
+#define SERVO_AZ_RANGE_DEG  320.0f
 #define SERVO_EL_RANGE_DEG  180.0f
 
 typedef enum {

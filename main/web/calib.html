@@ -21,11 +21,15 @@ button{padding:9px 12px;border:none;border-radius:5px;cursor:pointer;font-size:.
 .jog:active{background:#4fc3f7;color:#1a1a2e}
 .preset{background:#1a3a5c;color:#90caf9}
 .preset:active{background:#4fc3f7;color:#1a1a2e}
-.opt-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px}
-.opt-row label{font-size:.85em;color:#aaa}
-input[type=number]{width:72px;padding:6px;background:#0a1628;border:1px solid #4fc3f7;
-  color:#e0e0e0;border-radius:4px;font-size:.9em}
-.chk-label{display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer}
+/* 偏移 +/- 按钮 */
+.offset-row{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
+.offset-row label{font-size:.85em;color:#aaa;margin-right:2px}
+.off-btn{padding:7px 14px;font-size:1.1em;background:#1a3a5c;color:#4fc3f7;border-radius:5px;min-width:36px}
+.off-btn:active{background:#4fc3f7;color:#1a1a2e}
+.off-val{min-width:52px;text-align:center;font-size:1.1em;font-weight:bold;
+  background:#0a1628;border:1px solid #4fc3f7;border-radius:4px;padding:5px 4px;color:#e0e0e0}
+.off-hint{font-size:.75em;color:#607d8b;margin-left:4px}
+.chk-label{display:flex;align-items:center;gap:5px;font-size:.85em;cursor:pointer;margin-left:8px}
 input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 .btn-pause{width:100%;padding:13px;font-size:1em;background:#e65100;color:white;
   border-radius:6px;margin-bottom:12px}
@@ -45,6 +49,7 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 
 <button class="btn-pause" id="btnPause" onclick="togglePause()">⏸ 暂停跟踪</button>
 
+<!-- ====== 方位舵机 ====== -->
 <div class="card">
   <h2>方位舵机 (AZ)</h2>
   <div class="angle-row">
@@ -60,18 +65,24 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer}
   </div>
   <div class="btn-row">
     <button class="preset" onclick="setServo('az',0)">最小 0°</button>
-    <button class="preset" onclick="setServo('az',150)">归中 150°</button>
-    <button class="preset" onclick="setServo('az',300)">最大 300°</button>
+    <button class="preset" onclick="setServo('az',160)">归中 160°</button>
+    <button class="preset" onclick="setServo('az',320)">最大 320°</button>
   </div>
-  <div class="opt-row">
-    <label>偏移 offset：</label>
-    <input type="number" id="azOffset" step="0.5" value="0"> °
+  <!-- 偏移调节：按钮立即驱动到归中+偏移预览 -->
+  <div class="offset-row">
+    <label>安装偏移：</label>
+    <button class="off-btn" onclick="adjustOffset('az',-1)">−</button>
+    <span class="off-val" id="azOffsetVal">0.0</span>
+    <span class="unit">°</span>
+    <button class="off-btn" onclick="adjustOffset('az',1)">+</button>
+    <span class="off-hint">（调节时自动归中预览）</span>
     <label class="chk-label">
       <input type="checkbox" id="azReversed"> 方向反转
     </label>
   </div>
 </div>
 
+<!-- ====== 仰角舵机 ====== -->
 <div class="card">
   <h2>仰角舵机 (EL)</h2>
   <div class="angle-row">
@@ -90,9 +101,14 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer}
     <button class="preset" onclick="setServo('el',90)">垂直 90°</button>
     <button class="preset" onclick="setServo('el',180)">最大 180°</button>
   </div>
-  <div class="opt-row">
-    <label>偏移 offset：</label>
-    <input type="number" id="elOffset" step="0.5" value="0"> °
+  <!-- 偏移调节：按钮立即驱动到 90°（垂直朝上）+偏移预览 -->
+  <div class="offset-row">
+    <label>安装偏移：</label>
+    <button class="off-btn" onclick="adjustOffset('el',-1)">−</button>
+    <span class="off-val" id="elOffsetVal">0.0</span>
+    <span class="unit">°</span>
+    <button class="off-btn" onclick="adjustOffset('el',1)">+</button>
+    <span class="off-hint">（调节时驱动至 90° 预览）</span>
     <label class="chk-label">
       <input type="checkbox" id="elReversed"> 方向反转
     </label>
@@ -103,73 +119,97 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer}
 <button class="btn-reset" onclick="resetCalib()">↺ 重置标定参数</button>
 
 <script>
-var curAz=150,curEl=90,paused=false;
+var curAz = 150, curEl = 90, paused = false;
+var curAzOffset = 0, curElOffset = 0;
 
-function applyStatus(d){
-  curAz=d.az_raw; curEl=d.el_raw; paused=d.paused;
-  document.getElementById('azAngle').textContent=d.az_raw.toFixed(1);
-  document.getElementById('elAngle').textContent=d.el_raw.toFixed(1);
-  document.getElementById('azOffset').value=d.az_offset.toFixed(1);
-  document.getElementById('elOffset').value=d.el_offset.toFixed(1);
-  document.getElementById('azReversed').checked=d.az_reversed;
-  document.getElementById('elReversed').checked=d.el_reversed;
-  var btn=document.getElementById('btnPause');
-  var sl=document.getElementById('statusLine');
-  var homeTag=d.home_ready
-    ?'<span class="home-badge home-ok">GPS ✓</span>'
-    :'<span class="home-badge home-wait">GPS 标定中</span>';
-  if(paused){
-    btn.textContent='▶ 恢复跟踪';
-    btn.style.background='#2e7d32';
-    sl.innerHTML='⏸ 标定模式'+homeTag;
-    sl.className='status paused';
+function applyStatus(d) {
+  curAz = d.az_raw; curEl = d.el_raw; paused = d.paused;
+  curAzOffset = d.az_offset; curElOffset = d.el_offset;
+
+  document.getElementById('azAngle').textContent    = d.az_raw.toFixed(1);
+  document.getElementById('elAngle').textContent    = d.el_raw.toFixed(1);
+  document.getElementById('azOffsetVal').textContent = d.az_offset.toFixed(1);
+  document.getElementById('elOffsetVal').textContent = d.el_offset.toFixed(1);
+  document.getElementById('azReversed').checked      = d.az_reversed;
+  document.getElementById('elReversed').checked      = d.el_reversed;
+
+  var btn = document.getElementById('btnPause');
+  var sl  = document.getElementById('statusLine');
+  var homeTag = d.home_ready
+    ? '<span class="home-badge home-ok">GPS ✓</span>'
+    : '<span class="home-badge home-wait">GPS 标定中</span>';
+  if (paused) {
+    btn.textContent = '▶ 恢复跟踪';
+    btn.style.background = '#2e7d32';
+    sl.innerHTML = '⏸ 标定模式' + homeTag;
+    sl.className = 'status paused';
   } else {
-    btn.textContent='⏸ 暂停跟踪';
-    btn.style.background='#e65100';
-    sl.innerHTML='● 跟踪中'+homeTag;
-    sl.className='status';
+    btn.textContent = '⏸ 暂停跟踪';
+    btn.style.background = '#e65100';
+    sl.innerHTML = '● 跟踪中' + homeTag;
+    sl.className = 'status';
   }
 }
 
-function poll(){
-  fetch('/api/status').then(function(r){return r.json();}).then(applyStatus)
-    .catch(function(){document.getElementById('statusLine').textContent='⚠ 连接失败';});
+function poll() {
+  fetch('/api/status').then(function(r) { return r.json(); }).then(applyStatus)
+    .catch(function() { document.getElementById('statusLine').textContent = '⚠ 连接失败'; });
 }
 
-function jogServo(axis,delta){
-  setServo(axis,(axis==='az'?curAz:curEl)+delta);
+function jogServo(axis, delta) {
+  setServo(axis, (axis === 'az' ? curAz : curEl) + delta);
 }
 
-function setServo(axis,angle){
-  var body=axis==='az'?{az:angle,el:curEl}:{az:curAz,el:angle};
-  fetch('/api/servo',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)}).then(function(r){return r.json();}).then(applyStatus);
+function setServo(axis, angle) {
+  var body = axis === 'az' ? {az: angle, el: curEl} : {az: curAz, el: angle};
+  fetch('/api/servo', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json(); }).then(applyStatus);
 }
 
-function togglePause(){
-  fetch('/api/track/pause',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pause:!paused})}).then(function(r){return r.json();}).then(applyStatus);
+/* 偏移 +/- 按钮：delta ±1°，服务端更新内存偏移并立即驱动归中预览 */
+function adjustOffset(axis, delta) {
+  fetch('/api/calib/offset', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({axis: axis, delta: delta})
+  }).then(function(r) { return r.json(); }).then(applyStatus);
 }
 
-function saveCalib(){
-  var body={
-    az_offset:parseFloat(document.getElementById('azOffset').value),
-    el_offset:parseFloat(document.getElementById('elOffset').value),
-    az_reversed:document.getElementById('azReversed').checked,
-    el_reversed:document.getElementById('elReversed').checked
+function togglePause() {
+  fetch('/api/track/pause', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pause: !paused})
+  }).then(function(r) { return r.json(); }).then(applyStatus);
+}
+
+/* 保存时直接使用内存中已有的偏移值（由 applyStatus 同步到 curAzOffset/curElOffset） */
+function saveCalib() {
+  var body = {
+    az_offset:   curAzOffset,
+    el_offset:   curElOffset,
+    az_reversed: document.getElementById('azReversed').checked,
+    el_reversed: document.getElementById('elReversed').checked
   };
-  fetch('/api/calib/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)}).then(function(r){return r.json();}).then(function(d){
-      applyStatus(d); alert('标定已保存');});
+  fetch('/api/calib/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    applyStatus(d);
+    alert('✅ 标定已保存到 NVS（断电/刷固件均保留）');
+  });
 }
 
-function resetCalib(){
-  if(!confirm('确认重置所有标定参数？')) return;
-  fetch('/api/calib/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    applyStatus(d); alert('标定已重置');});
+function resetCalib() {
+  if (!confirm('确认重置所有标定参数？')) return;
+  fetch('/api/calib/reset', {method: 'POST'})
+    .then(function(r) { return r.json(); }).then(function(d) {
+      applyStatus(d);
+      alert('标定已重置');
+    });
 }
 
-setInterval(poll,1000);
+setInterval(poll, 1000);
 poll();
 </script>
 </body>
