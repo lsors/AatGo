@@ -2,10 +2,7 @@
 
 #include "esp_err.h"
 #include "config_store.h"
-
-/* GPIO pins — assign after PCB is finalised */
-#define SERVO_AZ_GPIO   18
-#define SERVO_EL_GPIO   19
+#include "board.h"
 
 #define SERVO_AZ_RANGE_DEG  300.0f
 #define SERVO_EL_RANGE_DEG  180.0f

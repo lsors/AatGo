@@ -1,7 +1,6 @@
 #pragma once
 
-/* GPIO pin — assign after PCB is finalised */
-#define BUZZER_GPIO  2
+#include "board.h"
 
 typedef enum {
     BUZZER_PATTERN_CALIBRATED = 0,  /* 滴滴两短声：坐标标定完成 */
