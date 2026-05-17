@@ -5,3 +5,5 @@ sdkconfig
 __pycache__/
 main/include/version.h
 *.pyc
+.claude/settings.local.json
+dependencies.lock
