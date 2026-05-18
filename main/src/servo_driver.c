@@ -48,7 +48,16 @@ static void servo_write_raw(servo_id_t id, float raw_deg)
     if (raw_deg < 0.0f)    raw_deg = 0.0f;
     if (raw_deg > range)   raw_deg = range;
     s_raw_deg[id] = raw_deg;
-    ledc_set_duty(LEDC_MODE, CH_ID[id], angle_to_duty(id, raw_deg));
+
+    uint32_t pulse_us = (uint32_t)(PULSE_MIN_US +
+                        (raw_deg / range) * (CH_PULSE_MAX[id] - PULSE_MIN_US));
+    uint32_t duty     = pulse_to_duty(pulse_us);
+
+    ESP_LOGI(TAG, "%s → %.1f° | %lu µs | duty %lu",
+             (id == SERVO_AZ) ? "AZ" : "EL",
+             raw_deg, (unsigned long)pulse_us, (unsigned long)duty);
+
+    ledc_set_duty(LEDC_MODE, CH_ID[id], duty);
     ledc_update_duty(LEDC_MODE, CH_ID[id]);
 }
 
@@ -80,6 +89,12 @@ esp_err_t servo_driver_init(void)
         err = ledc_channel_config(&ch);
         if (err != ESP_OK) return err;
         s_raw_deg[i] = INIT_DEG[i];
+
+        uint32_t init_pulse = (uint32_t)(PULSE_MIN_US +
+                              (INIT_DEG[i] / CH_RANGE[i]) * (CH_PULSE_MAX[i] - PULSE_MIN_US));
+        ESP_LOGI(TAG, "%s init → %.1f° | %lu µs",
+                 (i == SERVO_AZ) ? "AZ" : "EL",
+                 INIT_DEG[i], (unsigned long)init_pulse);
     }
 
     ESP_LOGI(TAG, "Servo driver ready — AZ GPIO%d (320°)  EL GPIO%d (180°)  @%d Hz",

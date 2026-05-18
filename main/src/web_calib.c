@@ -144,8 +144,8 @@ static esp_err_t handler_track_pause(httpd_req_t *req)
 
 /* POST /api/calib/offset  {"axis":"az","delta":1}
  * 在内存中更新偏移量，立即驱动对应舵机到参考归中位置供观察，不写 NVS。
- * AZ 参考位置：150°（300° 量程正中心）
- * EL 参考位置：  0°（天线水平朝前）
+ * AZ 参考位置：160°（320° 量程正中心，对应地理正南）
+ * EL 参考位置：  90°（天线垂直朝上）
  */
 static esp_err_t handler_calib_offset(httpd_req_t *req)
 {
@@ -175,8 +175,8 @@ static esp_err_t handler_calib_offset(httpd_req_t *req)
     if (is_az) {
         s_calib.az_offset_deg += delta;
         servo_calib_update(&s_calib);
-        /* 驱动到 AZ 量程中心，叠加新偏移，方便观察安装对中是否准确 */
-        servo_set_angle(SERVO_AZ, 150.0f);
+        /* 驱动到 AZ 量程中心（160° = 320°/2），叠加新偏移，方便观察是否对准正南 */
+        servo_set_angle(SERVO_AZ, 160.0f);
     } else {
         s_calib.el_offset_deg += delta;
         servo_calib_update(&s_calib);

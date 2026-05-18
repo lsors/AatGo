@@ -115,6 +115,36 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer}
   </div>
 </div>
 
+<!-- ====== 操作杆 ====== -->
+<div class="card">
+  <h2>操作杆 <span style="font-size:.8em;color:#607d8b;font-weight:normal">左右→AZ &nbsp; 上下→EL &nbsp; 偏移越大速度越快</span></h2>
+  <div style="display:flex;justify-content:center;align-items:center;gap:20px;padding:4px 0 8px">
+    <div id="joyZone" style="position:relative;width:200px;height:200px;flex-shrink:0;
+         background:#0a1628;border:2px solid #4fc3f7;border-radius:50%;touch-action:none;user-select:none">
+      <!-- 十字参考线 -->
+      <div style="position:absolute;top:50%;left:8%;right:8%;height:1px;background:#1a3a5c;transform:translateY(-50%)"></div>
+      <div style="position:absolute;left:50%;top:8%;bottom:8%;width:1px;background:#1a3a5c;transform:translateX(-50%)"></div>
+      <!-- 方向标记 -->
+      <span style="position:absolute;top:6px;left:50%;transform:translateX(-50%);font-size:.7em;color:#4fc3f7">EL↑</span>
+      <span style="position:absolute;bottom:6px;left:50%;transform:translateX(-50%);font-size:.7em;color:#4fc3f7">EL↓</span>
+      <span style="position:absolute;left:6px;top:50%;transform:translateY(-50%);font-size:.7em;color:#4fc3f7">AZ←</span>
+      <span style="position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:.7em;color:#4fc3f7">AZ→</span>
+      <!-- 操作点 -->
+      <div id="joyDot" style="position:absolute;width:56px;height:56px;
+           background:#4fc3f7;border-radius:50%;top:50%;left:50%;
+           transform:translate(-50%,-50%);box-shadow:0 0 12px #4fc3f766;
+           transition:background .15s"></div>
+    </div>
+    <!-- 速度 / 当前值显示 -->
+    <div style="font-size:.85em;color:#90caf9;line-height:2">
+      <div>AZ <span id="joyAzVal" style="color:#e0e0e0;font-weight:bold">---</span>°</div>
+      <div>EL <span id="joyElVal" style="color:#e0e0e0;font-weight:bold">---</span>°</div>
+      <div style="margin-top:8px;color:#607d8b;font-size:.9em">速度</div>
+      <div id="joySpeed" style="color:#ffb74d;font-weight:bold">0 °/s</div>
+    </div>
+  </div>
+</div>
+
 <button class="btn-save" onclick="saveCalib()">💾 保存标定到 NVS</button>
 <button class="btn-reset" onclick="resetCalib()">↺ 重置标定参数</button>
 
@@ -211,6 +241,104 @@ function resetCalib() {
 
 setInterval(poll, 1000);
 poll();
+
+/* ============================================================
+ * 操作杆
+ * ============================================================ */
+(function () {
+  var TICK_MS      = 80;   /* 轮询间隔 ms */
+  var MAX_DEG_TICK = 10;   /* 满偏时每 tick 移动的最大度数 */
+  var AZ_MAX       = 320;
+  var EL_MAX       = 180;
+
+  var zone  = document.getElementById('joyZone');
+  var dot   = document.getElementById('joyDot');
+  var azVal = document.getElementById('joyAzVal');
+  var elVal = document.getElementById('joyElVal');
+  var spdEl = document.getElementById('joySpeed');
+
+  var active = false;
+  var nx = 0, ny = 0;   /* 归一化偏移 [-1, 1] */
+  var timer = null;
+
+  function getRadius() { return zone.getBoundingClientRect().width / 2 - 8; }
+
+  function moveDot(dx, dy, r) {
+    /* dot 最大位移为 40% 半径，视觉不超边 */
+    var pct = 40;
+    dot.style.left = (50 + nx * pct) + '%';
+    dot.style.top  = (50 - ny * pct) + '%';
+  }
+
+  function onStart(e) {
+    e.preventDefault();
+    active = true;
+    dot.style.background = '#0288d1';
+    dot.style.boxShadow  = '0 0 18px #0288d1aa';
+    onMove(e);
+    if (!timer) timer = setInterval(tick, TICK_MS);
+  }
+
+  function onMove(e) {
+    if (!active) return;
+    e.preventDefault();
+    var rect   = zone.getBoundingClientRect();
+    var cx = rect.left + rect.width  / 2;
+    var cy = rect.top  + rect.height / 2;
+    var t  = e.touches ? e.touches[0] : e;
+    var dx = t.clientX - cx;
+    var dy = t.clientY - cy;
+    var r  = getRadius();
+    var d  = Math.sqrt(dx * dx + dy * dy);
+    if (d > r) { dx = dx / d * r; dy = dy / d * r; }
+    nx = dx / r;
+    ny = -dy / r;   /* 屏幕 Y 轴向下，取反使上方为正 */
+    moveDot();
+    /* 速度显示 */
+    var spd = Math.round(Math.sqrt(nx*nx + ny*ny) * MAX_DEG_TICK / TICK_MS * 1000);
+    spdEl.textContent = spd + ' °/s';
+  }
+
+  function onEnd(e) {
+    active = false;
+    nx = 0; ny = 0;
+    dot.style.left       = '50%';
+    dot.style.top        = '50%';
+    dot.style.background = '#4fc3f7';
+    dot.style.boxShadow  = '0 0 12px #4fc3f766';
+    spdEl.textContent    = '0 °/s';
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  function tick() {
+    if (!active || (nx === 0 && ny === 0)) return;
+    var newAz = Math.max(0, Math.min(AZ_MAX, curAz + nx * MAX_DEG_TICK));
+    var newEl = Math.max(0, Math.min(EL_MAX, curEl + ny * MAX_DEG_TICK));
+    /* 本地立即更新，减少视觉延迟 */
+    curAz = newAz; curEl = newEl;
+    azVal.textContent = newAz.toFixed(1);
+    elVal.textContent = newEl.toFixed(1);
+    document.getElementById('azAngle').textContent = newAz.toFixed(1);
+    document.getElementById('elAngle').textContent = newEl.toFixed(1);
+    /* 发送到设备，忽略响应（避免堆积请求） */
+    fetch('/api/servo', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({az: newAz, el: newEl})
+    }).catch(function(){});
+  }
+
+  /* 鼠标事件 */
+  zone.addEventListener('mousedown',  onStart);
+  zone.addEventListener('mousemove',  onMove);
+  zone.addEventListener('mouseup',    onEnd);
+  zone.addEventListener('mouseleave', onEnd);
+  /* 触摸事件 */
+  zone.addEventListener('touchstart', onStart, {passive: false});
+  zone.addEventListener('touchmove',  onMove,  {passive: false});
+  zone.addEventListener('touchend',   onEnd);
+  zone.addEventListener('touchcancel',onEnd);
+}());
 </script>
 </body>
 </html>

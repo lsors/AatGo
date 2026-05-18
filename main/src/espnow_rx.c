@@ -3,6 +3,7 @@
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
+#include <stdio.h>
 
 #define GPS_QUEUE_DEPTH 4
 
@@ -14,11 +15,38 @@ static void espnow_recv_cb(const esp_now_recv_info_t *recv_info,
 {
     if (!data || data_len <= 0) return;
 
+    /* ---- 打印每一个收到的 ESP-NOW 包 ---- */
+    const uint8_t *mac = recv_info->src_addr;
+    ESP_LOGI(TAG, "PKT from %02X:%02X:%02X:%02X:%02X:%02X  len=%d  rssi=%d",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             data_len,
+             recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : 0);
+
+    /* 打印原始字节（十六进制），最多显示 32 字节防止刷屏 */
+    int print_len = data_len > 32 ? 32 : data_len;
+    char hex[32 * 3 + 1];
+    for (int i = 0; i < print_len; i++) {
+        snprintf(hex + i * 3, 4, "%02X ", data[i]);
+    }
+    ESP_LOGI(TAG, "RAW [%.*s%s]", print_len * 3, hex,
+             data_len > 32 ? "..." : "");
+
+    /* ---- 解析 CRSF GPS 帧 ---- */
     crsf_gps_frame_t frame;
     if (crsf_parse_gps(data, (uint16_t)data_len, &frame)) {
+        ESP_LOGI(TAG, "GPS lat=%.7f lon=%.7f alt=%.1fm spd=%.1fkm/h hdg=%.1f° sats=%d",
+                 frame.latitude  / 1e7,
+                 frame.longitude / 1e7,
+                 (float)frame.altitude - 1000.0f,
+                 frame.groundspeed / 10.0f,
+                 frame.heading / 100.0f,
+                 frame.satellites);
+
         if (xQueueSend(s_gps_queue, &frame, 0) != pdTRUE) {
             ESP_LOGW(TAG, "GPS queue full, frame dropped");
         }
+    } else {
+        ESP_LOGW(TAG, "No valid CRSF GPS frame in packet");
     }
 }
 
